@@ -1,0 +1,420 @@
+---
+- name: Update /etc/hosts file
+  hosts: master,works
+  become: yes
+
+  tasks:
+    - name: Check if /etc/hosts is updated
+      stat:
+        path: /tmp/ansible_hosts_updated
+      register: hosts_file_updated
+
+    - name: Add master IP to /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{  hostvars[item]['ansible_default_ipv4']['address'] }}  {{ hostvars[item]['ansible_hostname'] }}"
+      loop: "{{ groups['master'] + groups['works'] }}"
+      when: not hosts_file_updated.stat.exists
+
+    - name: Create a flag file to indicate /etc/hosts is updated
+      command: touch /tmp/ansible_hosts_updated
+      when: not hosts_file_updated.stat.exists
+
+- name: Copy /root/k3s/ipvs.modules to remote hosts and set permissions
+  hosts: master,works
+  tasks:
+    - name: Copy file
+      copy:
+        src: /root/ipvs/ipvs.modules
+        dest: /etc/sysconfig/modules/ipvs.modules
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Execute file
+      command: /etc/sysconfig/modules/ipvs.modules
+
+- name: Cancel firewalld, selinux, stop NetworkManager and disable firewalld and NetworkManager
+  hosts: master,works
+  become: yes
+  tasks:
+    - name: Stop firewalld service
+      systemd:
+        name: firewalld
+        state: stopped
+
+    - name: Disable firewalld service
+      systemd:
+        name: firewalld
+        enabled: no
+
+    - name: Stop NetworkManager service
+      systemd:
+        name: NetworkManager
+        state: stopped
+
+    - name: Disable NetworkManager service
+      systemd:
+        name: NetworkManager
+        enabled: no
+
+- name: Check Configure SELinux
+  hosts: master,works 
+  become: yes  
+
+  tasks:
+    - name: Set SELinux to permissive mode
+      command: setenforce 0
+      ignore_errors: yes  
+
+    - name: Modify SELinux configuration
+      lineinfile:
+        path: /etc/selinux/config
+        regexp: '^SELINUX=enforcing'
+        line: 'SELINUX=disabled'
+
+    - name: Check SELinux status
+      command: getenforce
+      register: selinux_status
+
+    - name: Display SELinux status
+      debug:
+        var: selinux_status.stdout
+
+- name: Install WireGuard 
+  hosts: master,works
+  become: yes
+
+  tasks:
+    - name: Import elrepo GPG key
+      command: rpm --import https://www.elrepo.org/RPM-GPG-KEY-elrepo.org
+
+    - name: Install elrepo repository RPM
+      yum:
+        name: http://www.elrepo.org/elrepo-release-7.0-3.el7.elrepo.noarch.rpm
+        state: present
+      register: install_repository_result
+ 
+    - name: Pause for 1 minutes after repository installation
+      pause:
+        minutes: 1
+      when: install_repository_result.changed 
+
+    - name: Update kernel repolist
+      shell: yum --disablerepo=\* --enablerepo=elrepo-kernel install  kernel-ml.x86_64  -y 
+      register: install_kernel_result
+
+    - name: Pause for 1 minutes after kernel installation
+      pause:
+        minutes: 1
+      when: install_kernel_result.changed
+
+    - name: Install  kernel using elrepo
+      shell: yum --disablerepo=\* --enablerepo=elrepo-kernel install  kernel-ml.x86_64  -y
+      register: install_kernel_elrepo_result
+      
+    - name: Pause for 1 minutes after kernel elrepo installation
+      pause:
+        minutes: 1
+      when: install_kernel_elrepo_result.changed
+      
+    - name: Remove old kernel-tools packages
+      yum:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - kernel-tools-libs.x86_64
+        - kernel-tools.x86_64
+      register: install_kernel_tools_result
+      
+    - name: Pause for 1 minutes after kernel tools installation
+      pause:
+        minutes: 1
+      when: install_kernel_tools_result.changed
+
+    - name: Install perl
+      yum:
+        name: perl
+        state: present
+      register: install_perl_result
+
+    - name: Pause for 1 minutes after kernel tools installation
+      pause:
+        minutes: 1
+      when: install_perl_result.changed
+
+    - name: Install kernel-ml-tools, kernel-ml-devel, kernel-ml-headers
+      shell: yum --disablerepo=\* --enablerepo=elrepo-kernel install kernel-ml-tools kernel-ml-devel kernel-ml-headers -y
+      register: install_kernel_all_result 
+      
+    - name: Pause for 2 minutes after kernel tools installation
+      pause:
+        minutes: 2
+      when: install_kernel_all_result.changed
+      
+    - name: Install epel-release and elrepo repository
+      yum:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - epel-release
+        - https://www.elrepo.org/elrepo-release-7.el7.elrepo.noarch.rpm
+      register: install_elrepo_result
+        
+    - name: Pause for 2 minutes after kernel tools installation
+      pause:
+        minutes: 2
+      when: install_elrepo_result.changed
+
+    - name: Install yum-plugin-elrepo
+      yum:
+        name: yum-plugin-elrepo
+        state: present
+      register: install_yum_plugin_result
+      
+    - name: Pause for 2 minutes after install_yum-plugin installation
+      pause:
+        minutes: 2
+      when: install_yum_plugin_result.changed      
+
+    - name: Install kmod-wireguard and wireguard-tools
+      yum:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - kmod-wireguard
+        - wireguard-tools
+      register: install_wireguard_result  
+
+    - name: Pause for 2 minutes after wireguard installation
+      pause:
+        minutes: 2
+      when: install_wireguard_result.changed  
+
+- name: Install Docker
+  hosts: master,works
+  become: yes
+
+  tasks:
+    - name: Install Wget
+      yum:
+        name: wget
+        state: present
+
+    - name: Download Docker repository file
+      command: wget -O /etc/yum.repos.d/docker-ce.repo https://mirrors.aliyun.com/docker-ce/linux/centos/docker-ce.repo
+
+    - name: Update YUM cache
+      yum:
+        name: '*'
+        state: present
+        update_cache: yes
+
+    - name: Install Docker
+      yum:
+        name:
+          - docker-ce-19.03.13
+          - docker-ce-cli-19.03.13
+        state: present
+      register: install_docker_result      
+
+    - name: Pause for 2 minutes after docker installation
+      pause:
+        minutes: 2
+      when: install_docker_result.changed
+
+    - name: Create Docker configuration directory
+      file:
+        path: /etc/docker
+        state: directory
+
+    - name: Configure Docker daemon
+      copy:
+        content: |
+          {
+            "graph": "/data/var/lib/docker",
+            "registry-mirrors": ["https://jolha8c2.mirror.aliyuncs.com"],
+            "insecure-registries":["registry2.whalehouse.com"]
+          }
+        dest: /etc/docker/daemon.json
+
+    - name: Enable and start Docker service
+      systemd:
+        name: docker
+        enabled: yes
+        state: started
+
+    - name: Check Docker version
+      command: docker -v
+      register: docker_version
+
+    - name: Display Docker version
+      debug:
+        var: docker_version.stdout
+
+- name: Install K3s Master
+  hosts: master
+  become: yes
+
+  tasks:
+    - name: Download K3s
+      shell:  curl -sfL https://rancher-mirror.oss-cn-beijing.aliyuncs.com/k3s/k3s-install.sh | INSTALL_K3S_SKIP_START=true K3S_KUBECONFIG_MODE=644 INSTALL_K3S_VERSION=v1.18.9+k3s1 sh -s - server --docker 
+      register: install_k3s_server_result
+
+    - name: Pause for 4 minutes after k3s server installation
+      pause:
+        minutes: 4
+      when: install_k3s_server_result.changed
+ 
+    - name: Create k3s systemd service unit file
+      copy:
+        content: |
+          [Unit]
+          Description=Lightweight Kubernetes
+          Documentation=https://k3s.io
+          Wants=network-online.target
+          After=network-online.target
+
+          [Install]
+          WantedBy=multi-user.target
+
+          [Service]
+          Type=notify
+          EnvironmentFile=-/etc/default/%N
+          EnvironmentFile=-/etc/sysconfig/%N
+          EnvironmentFile=-/etc/systemd/system/k3s.service.env
+          KillMode=process
+          Delegate=yes
+          # Having non-zero Limit*s causes performance problems due to accounting overhead
+          # in the kernel. We recommend using cgroups to do container-local accounting.
+          LimitNOFILE=1048576
+          LimitNPROC=infinity
+          LimitCORE=infinity
+          TasksMax=infinity
+          TimeoutStartSec=0
+          Restart=always
+          RestartSec=5s
+          ExecStartPre=/bin/sh -xc '! /usr/bin/systemctl is-enabled --quiet nm-cloud-setup.service'
+          ExecStartPre=-/sbin/modprobe br_netfilter
+          ExecStartPre=-/sbin/modprobe overlay
+          ExecStart=/usr/local/bin/k3s \
+              server --docker \
+              --tls-san {{ inventory_hostname }} \
+              --node-ip {{ inventory_hostname }} \
+              --node-external-ip {{ inventory_hostname }} \
+              --no-deploy servicelb,traefik \
+              --bind-address {{ inventory_hostname }} \
+              --flannel-backend wireguard \
+              --kube-proxy-arg "proxy-mode=ipvs" "masquerade-all=true" \
+              --kube-proxy-arg "metrics-bind-address=0.0.0.0"
+        dest: /etc/systemd/system/k3s.service
+
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+
+    - name: Start and enable k3s service
+      systemd:
+        name: k3s
+        state: started
+        enabled: yes
+    - name: Get contents of node-token file
+      shell: cat /var/lib/rancher/k3s/server/node-token
+      register: node_token_content
+
+    - name: Set node token as a global variable
+      set_fact:
+        k3s_node_token: "{{ node_token_content.stdout }}"
+
+- name: Install K3s Client
+  hosts: works
+  become: yes
+
+  tasks:
+    - name: Set node token as a global variable
+      set_fact:
+        k3s_node_token: "{{ hostvars[groups['master'][0]]['k3s_node_token'] }}"
+      delegate_to: "{{ groups['master'][0] }}"
+
+    - name: Download K3s Client
+      shell: curl -sfL https://rancher-mirror.oss-cn-beijing.aliyuncs.com/k3s/k3s-install.sh | INSTALL_K3S_VERSION=v1.18.9+k3s1 INSTALL_K3S_SKIP_START=true K3S_URL=https://{{ hostvars[item]['ansible_hostname'] }}:6443 K3S_TOKEN={{ k3s_node_token }}  sh -s - agent --docker 
+      loop: "{{ groups['master'] }}"
+      register: install_k3s_agent_result
+
+    - name: Pause for 4 minutes after k3s agent installation
+      pause:
+        minutes: 4
+      when: install_k3s_agent_result.changed
+
+    - name: Create k3s agent systemd service unit file
+      copy:
+        content: |
+          [Unit]
+          Description=Lightweight Kubernetes
+          Documentation=https://k3s.io
+          Wants=network-online.target
+          After=network-online.target
+    
+          [Install]
+          WantedBy=multi-user.target
+    
+          [Service]
+          Type=exec
+          EnvironmentFile=/etc/systemd/system/k3s-agent.service.env
+          KillMode=process
+          Delegate=yes
+          # Having non-zero Limit*s causes performance problems due to accounting overhead
+          # in the kernel. We recommend using cgroups to do container-local accounting.
+          LimitNOFILE=1048576
+          LimitNPROC=infinity
+          LimitCORE=infinity
+          TasksMax=infinity
+          TimeoutStartSec=0
+          Restart=always
+          RestartSec=5s
+          ExecStartPre=-/sbin/modprobe br_netfilter
+          ExecStartPre=-/sbin/modprobe overlay
+          ExecStart=/usr/local/bin/k3s \
+                  agent --docker \
+                  --flannel-backend wireguard \
+                  --kube-proxy-arg "proxy-mode=ipvs" "masquerade-all=true" \
+                  --kube-proxy-arg "metrics-bind-address=0.0.0.0"
+        dest: /etc/systemd/system/k3s-agent.service
+        
+    - name: Reload systemd
+      systemd:
+        daemon_reload: yes
+    
+    - name: Start and enable k3s agent service
+      systemd:
+        name: k3s-agent
+        state: started
+        enabled: yes
+
+- name: Install bash-completion package
+  hosts: master
+  become: yes
+  tasks:
+    - name: Install bash-completion package
+      yum:
+        name: bash-completion
+        state: present
+
+    - name: Source bash completion
+      shell: source /usr/share/bash-completion/bash_completion
+      args:
+        executable: /bin/bash
+
+    - name: Add kubectl completion to /etc/profile
+      lineinfile:
+        path: /etc/profile
+        line: "source <(kubectl completion bash)"
+        insertafter: EOF
+
+    - name: Source /etc/profile
+      shell: source /etc/profile
+      args:
+        executable: /bin/bash
+
+    - name: test kubecl
+      shell: kubectl get pod 
