@@ -2,7 +2,7 @@
 
 #### 介绍
 项目只是单点master集群，而且develop分支是在线部署，需要网络通畅，不然会发生下载中断。
-
+master分支是离线部署。（推荐）
 #### 软件架构
 ansible+docker+k3s+wireguard
 
