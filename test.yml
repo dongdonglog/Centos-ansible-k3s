@@ -25,7 +25,7 @@
   tasks:
     - name: Copy file
       copy:
-        src: /root/ipvs/ipvs.modules
+        src: ./ipvs.modules
         dest: /etc/sysconfig/modules/ipvs.modules
         owner: root
         group: root
@@ -251,6 +251,41 @@
     - name: Display Docker version
       debug:
         var: docker_version.stdout
+        
+- name: Unarchive k3s.tar.gz and Download k3s-install.sh
+  hosts: master,works
+  tasks:
+    - name: Ensure /usr/local/bin directory exists
+      file:
+        path: /usr/local/bin
+        state: directory
+
+    - name: Unarchive k3s.tar.gz
+      unarchive:
+        src: ./k3s.tar.gz 
+        dest: /usr/local/bin
+        remote_src: yes
+        
+    - name: Ensure k3s-install.sh directory exists
+      file:
+        path: /root/
+        state: directory
+
+    - name: Download k3s-install.sh
+      get_url:
+        url: https://rancher-mirror.oss-cn-beijing.aliyuncs.com/k3s/k3s-install.sh
+        dest: /root/k3s-install.sh  
+        mode: '0755'  
+
+    - name: Install container-selinux
+      yum:
+        name: container-selinux
+        state: present
+        
+    - name: Install k3s-selinux policy
+      yum:
+        name: ./k3s-selinux.rpm
+        state: present
 
 - name: Install K3s Master
   hosts: master
@@ -258,12 +293,12 @@
 
   tasks:
     - name: Download K3s
-      shell:  curl -sfL https://rancher-mirror.oss-cn-beijing.aliyuncs.com/k3s/k3s-install.sh | INSTALL_K3S_SKIP_START=true K3S_KUBECONFIG_MODE=644 INSTALL_K3S_VERSION=v1.18.9+k3s1 sh -s - server --docker 
+      shell: INSTALL_K3S_SKIP_START=true K3S_KUBECONFIG_MODE=644 INSTALL_K3S_VERSION=v1.18.9+k3s1 INSTALL_K3S_SKIP_DOWNLOAD=true sh -s - server --docker < /root/k3s-install.sh
       register: install_k3s_server_result
 
-    - name: Pause for 4 minutes after k3s server installation
+    - name: Pause for 3 minutes after k3s server installation
       pause:
-        minutes: 4
+        minutes: 3
       when: install_k3s_server_result.changed
  
     - name: Create k3s systemd service unit file
@@ -337,13 +372,13 @@
       delegate_to: "{{ groups['master'][0] }}"
 
     - name: Download K3s Client
-      shell: curl -sfL https://rancher-mirror.oss-cn-beijing.aliyuncs.com/k3s/k3s-install.sh | INSTALL_K3S_VERSION=v1.18.9+k3s1 INSTALL_K3S_SKIP_START=true K3S_URL=https://{{ hostvars[item]['ansible_hostname'] }}:6443 K3S_TOKEN={{ k3s_node_token }}  sh -s - agent --docker 
+      shell: INSTALL_K3S_VERSION=v1.18.9+k3s1 INSTALL_K3S_SKIP_START=true K3S_URL=https://{{ hostvars[item]['ansible_hostname'] }}:6443 K3S_TOKEN={{ k3s_node_token }}  sh -s - agent --docker < /root/k3s-install.sh
       loop: "{{ groups['master'] }}"
       register: install_k3s_agent_result
 
-    - name: Pause for 4 minutes after k3s agent installation
+    - name: Pause for 3 minutes after k3s agent installation
       pause:
-        minutes: 4
+        minutes: 3
       when: install_k3s_agent_result.changed
 
     - name: Create k3s agent systemd service unit file
@@ -376,7 +411,6 @@
           ExecStartPre=-/sbin/modprobe overlay
           ExecStart=/usr/local/bin/k3s \
                   agent --docker \
-                  --flannel-backend wireguard \
                   --kube-proxy-arg "proxy-mode=ipvs" "masquerade-all=true" \
                   --kube-proxy-arg "metrics-bind-address=0.0.0.0"
         dest: /etc/systemd/system/k3s-agent.service
